@@ -1,4 +1,7 @@
 /.vscode
-/gbaemu
+/LLGBA
 /Super*
 /*.gba
+/*.o
+/instrsema.bc
+/instrsema.ll
