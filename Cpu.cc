@@ -53,13 +53,6 @@ CPU::CPU(): PrivM(PrivMode::Normal), Mode(CPUMode::ARM), InstrWidth(4)
 
   ExitOnErr.setBanner("gbaemu: ");
 
-  std::memset(&GPR[0], 0, sizeof(int) * Register::RegCount);
-  setPC(0x8000000U);
-  Cpu = this;
-}
-
-void CPU::InitializeDisassembler()
-{
   std::string Error;
   std::string TripleName("armv7-unknown-unknown");
 
@@ -84,6 +77,9 @@ void CPU::InitializeDisassembler()
 
   int AsmPrinterVariant = AsmInfo->getAssemblerDialect();
   IP = TheTarget->createMCInstPrinter(Triple(TripleName), AsmPrinterVariant, *AsmInfo, *MII, *MRI);
+  std::memset(&GPR[0], 0, sizeof(int) * Register::RegCount);
+  setPC(0x8000000U);
+  Cpu = this;
 }
 
 CPU::DecodeStatus CPU::disassemble(ArrayRef<uint8_t> BinaryCode, MCInst &Inst)
@@ -93,13 +89,21 @@ CPU::DecodeStatus CPU::disassemble(ArrayRef<uint8_t> BinaryCode, MCInst &Inst)
   return DisAsm->getInstruction(Inst, Size, BinaryCode, 0, outs());
 }
 
-bool CPU::InstrFetch(MCInst &Inst)
+CPU::DecodeStatus CPU::InstrFetch(MCInst &Inst, uint32_t &ProgCounter)
 {
-  uint32_t ProgCounter = getIFProgCounter();
+  ProgCounter = getIFProgCounter();
   assert((ProgCounter & (InstrWidth - 1)) == 0 && "Program Counter is not aligned !");
   ArrayRef<uint8_t> BinaryCode = Mem->getMemDataRef(ProgCounter, InstrWidth);
   advancePCtoNext();
-  return disassemble(BinaryCode, Inst) == DecodeStatus::Success ? true : false;
+  DecodeStatus S;
+  if ((S = disassemble(BinaryCode, Inst)) != DecodeStatus::Success && Mode == CPUMode::THUMB) {
+    // Branch with link in Thumb is split into two instruction ...
+    BinaryCode = Mem->getMemDataRef(ProgCounter, 4);
+    advancePCtoNext();
+    S = disassemble(BinaryCode, Inst);
+  }
+  ProgCounter += InstrWidth * 2;
+  return S;
 }
 
 void CPU::execute()
@@ -107,7 +111,6 @@ void CPU::execute()
   auto J = ExitOnErr(LLJITBuilder().create());
   auto G = ExitOnErr(DynamicLibrarySearchGenerator::GetForCurrentProcess(J->getDataLayout().getGlobalPrefix()));
   J->getMainJITDylib().addGenerator(std::move(G));
-  InitializeDisassembler();
   AsmTranslator AT(this);
 
   while(true) {
@@ -126,17 +129,20 @@ void CPU::execute()
 
     while(true) {
       Instruction *I;
-      if (!InstrFetch(Inst)) {
-        errs() << "Instruction fetch failed\n";
+      uint32_t ProgCounter;
+      if (InstrFetch(Inst, ProgCounter) != DecodeStatus::Success) {
+        errs() << format_hex(getIFProgCounter() - InstrWidth, InstrWidth * 2) << ":  Instruction fetch failed\n";
         return;
       }
 
       switch(Inst.getOpcode()) {
 
-#define HANDLE_MCINST(CODE) \
-  case ARM::CODE:        \
-    I = AT.translate##CODE(*C, Mod.get(), Main, IB, Inst); \
+#define HANDLE_MCINST_WITH(CODE, NAME) \
+  case ARM::CODE:                   \
+    I = AT.translate##NAME(*C, Mod.get(), Main, IB, Inst, ProgCounter); \
     break;
+
+#define HANDLE_MCINST(CODE) HANDLE_MCINST_WITH(CODE, CODE)
 
       HANDLE_MCINST(Bcc)
       HANDLE_MCINST(MOVi)
@@ -147,20 +153,27 @@ void CPU::execute()
       HANDLE_MCINST(MOVr)
       HANDLE_MCINST(BX)
       HANDLE_MCINST(tPUSH)
+      HANDLE_MCINST_WITH(tMOVr, MOVr)
+      HANDLE_MCINST(tSUBspi)
+      HANDLE_MCINST(tBL)
+      HANDLE_MCINST(tMOVi8)
+      HANDLE_MCINST_WITH(tSTRspi, STRi12)
+      HANDLE_MCINST(tLSLri)
+      HANDLE_MCINST(tLDRpci)
+      HANDLE_MCINST(tSVC)
+      HANDLE_MCINST(STMDB_UPD)
 
       default:
-        Mod->dump();
         errs() << "Unknown instruction\n";
         Inst.dump();
-        printInst(Inst, getEXProgCounter());
+        printInst(Inst, ProgCounter);
         errs() << '\n';
         return;
       }
 
-      printInst(Inst, getEXProgCounter());
+      printInst(Inst, ProgCounter);
       outs() << '\n';
       if (I && I->isTerminator()) {
-        Mod->dump();
         break;
       }
     }
@@ -170,18 +183,17 @@ void CPU::execute()
     auto MainSymbol = ExitOnErr(J->lookup(Name));
     int (*MainFunc)(uint32_t *) = (int(*)(uint32_t *))MainSymbol.getAddress();
     int BranchAddress = MainFunc(&GPR[0]);
-    outs() << "BranchAddress " << format_hex(BranchAddress, 8) << '\n';
     setPC(BranchAddress);
   }
 }
 
 void CPU::printInst(MCInst &Inst, uint64_t Address)
 {
-  outs() << format_hex(getIFProgCounter() - InstrWidth, 8) << ": ";
+  outs() << format_hex(Address - 2 * InstrWidth, 8) << ": ";
   if (Mode == CPUMode::ARM) {
-    outs() << format_hex(*(uint32_t *)Mem->getPointer(getIFProgCounter() - InstrWidth), 8) << "  ";
+    outs() << format_hex(*(uint32_t *)Mem->getPointer(Address - 2 * InstrWidth), 8) << "  ";
   } else {
-    outs() << format_hex(*(uint16_t *)Mem->getPointer(getIFProgCounter() - InstrWidth), 4) << "  ";
+    outs() << format_hex(*(uint16_t *)Mem->getPointer(Address - 2 * InstrWidth), 4) << "  ";
   }
   const MCSubtargetInfo *STI = getARMOrThumb(ARMSTI, ThumbSTI);
   IP->printInst(&Inst, Address, "", *STI, outs());
@@ -195,12 +207,13 @@ void switchMode(uint32_t Addr) {
 
 void writeCPSR(unsigned int bitmask, int val)
 {
-  outs() << "----------warning: writeCPSR still not working---------------\n";
+  //----------warning: writeCPSR still not working---------------
 }
 
 void storeToMemory32(uint32_t Addr, uint32_t Val)
 {
-  outs() << "----------warning: MMIO still not working-----------\n";
+  //----------warning: MMIO still not working-----------
+  // outs() << "Store " << format_hex(Val, 8) << " to " << format_hex(Addr, 8) << '\n';
   Cpu->StoreToMemory<uint32_t>(Addr, Val);
 }
 

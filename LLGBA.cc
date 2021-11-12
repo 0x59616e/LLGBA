@@ -18,6 +18,7 @@ class VirtGBA {
 public:
   VirtGBA(std::string &RomName) {
     Mem.setRom(RomName);
+    Mem.setBios("bios.bin");
     Cpu.setMem(&Mem);
   }
   void run();

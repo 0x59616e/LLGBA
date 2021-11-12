@@ -12,16 +12,28 @@ ArrayRef<uint8_t> Memory::getMemDataRef(uint32_t Start, uint32_t Len)
   return {getPointer(Start), Len};
 }
 
-void Memory::setRom(std::string &RomName)
+void Memory::setRom(StringRef RomName)
+{
+  set(RomName, 0x8000000);
+}
+
+void Memory::setBios(StringRef RomName)
+{
+  set(RomName, 0);
+}
+
+void Memory::set(StringRef RomName, int32_t Start)
 {
   auto Buffer = MemoryBuffer::getFile(RomName);
   if (Buffer.getError()) {
-    errs() << "ROM read failed\n";
+    errs() << "BIOS loading failed\n";
     exit(-1);
   }
+
   const char *I = (*Buffer)->getBufferStart();
-  const char *End   = (*Buffer)->getBufferEnd();
-  for(int j = 0x8000000; I != End; ++I, j++) {
+  const char *End = (*Buffer)->getBufferEnd();
+
+  for (int j = Start; I != End; ++I, j++) {
     InternalMem[j] = (uint8_t)*I;
   }
 }

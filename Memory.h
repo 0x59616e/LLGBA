@@ -45,7 +45,10 @@ public:
   Memory() {
     InternalMem = new uint8_t[MemorySize()];
   }
-  void setRom(std::string &);
+  void setRom(StringRef);
+  void setBios(StringRef);
+  void set(StringRef, int32_t Start);
+
   uint64_t MemorySize() {
     return INTERNAL_MEMORY_SIZE + ROM_SIZE;
   }

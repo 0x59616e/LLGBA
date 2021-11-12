@@ -29,9 +29,9 @@ public:
 
   using DecodeStatus = MCDisassembler::DecodeStatus;
 
-  enum class CPUMode {
-    ARM,
-    THUMB,
+  enum CPUMode {
+    ARM   = 0,
+    THUMB = 1,
   };
 
   CPU();
@@ -46,7 +46,12 @@ public:
 
   void switchMode(CPUMode M) {
     Mode = M;
-    outs() << "switch to mode: " << (Mode == CPUMode::ARM ? "ARM\n" : "THUMB\n");
+    InstrWidth = getARMOrThumb(4, 2);
+    if (M == CPUMode::ARM) {
+      CPSR &= ~(1 << 5);
+    } else {
+      CPSR |= (1 << 5);
+    }
   };
 
   enum PrivMode {
@@ -94,7 +99,7 @@ public:
   };
   
 private:
-  bool InstrFetch(MCInst &);
+  DecodeStatus InstrFetch(MCInst &, uint32_t &);
   void printInst(MCInst &, uint64_t);
   DecodeStatus disassemble(ArrayRef<uint8_t>, MCInst &);
   PrivMode getPrivMode() { return PrivM; }
@@ -108,8 +113,6 @@ private:
   uint32_t getEXProgCounter() { return getPC() + InstrWidth; }
   void addOffsetToPC(uint32_t Offset) { GPR[Register::PC] += Offset; }
   void advancePCtoNext() { addOffsetToPC(InstrWidth); }
-
-  void InitializeDisassembler();
 
   PrivMode PrivM;
   // General Purpose Register
